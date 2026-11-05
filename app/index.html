@@ -2946,7 +2946,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
   }
 
   var TYPE_LABEL = { dine_in: 'Dine-in', takeaway: 'Takeaway', delivery: 'Delivery' };
-  var METHOD_LABEL = { upi: 'UPI', cash: 'Cash', card: 'Card', credit: 'Credit (udhar)', platform: 'Paid on the platform' };
+  var METHOD_LABEL = { upi: 'UPI', cash: 'Cash', card: 'Card', credit: 'Credit (udhar)', platform: 'Paid on the platform' }, UPI_UNVERIFIED = 'UPI (confirmed by cashier, not verified)', payLabel = function (p) { return p.method === 'upi' ? UPI_UNVERIFIED : METHOD_LABEL[p.method]; }, upiRefError = function (ref) { ref = String(ref || '').trim(); if (!ref) return 'Type the UPI reference (UTR) shown in your UPI app for this payment.'; if (!/^[A-Za-z0-9]{6,30}$/.test(ref)) return 'The UPI reference is 6 to 30 letters or numbers, no spaces.'; return ''; };
 
   // ---------- state ----------
   var S = { settings: null, taxRates: [], categories: [], items: [], areas: [], tables: [], counters: { invoice: {}, kot: {} }, orders: [], audit: [], expenses: [], expensePays: [], expenseCats: [], ledger: [], staff: [], online: [], channels: {} };
@@ -3323,7 +3323,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
     if (failing) return Promise.reject(new Error('This device cannot save right now, so payments are paused. Try again in a moment.'));
     if (!can('collect')) return Promise.reject(new Error('Only a cashier or manager can take payment.'));
     if (method === 'credit' && !custKey(o.customer)) return Promise.reject(new Error('Add the customer’s name or mobile number before recording credit.'));
-    if (!(amountPaise > 0)) return Promise.reject(new Error('Enter an amount more than ₹0.'));
+    if (!(amountPaise > 0)) return Promise.reject(new Error('Enter an amount more than ₹0.')); if (method === 'upi' && upiRefError(extra.ref)) return Promise.reject(new Error(upiRefError(extra.ref)));
     var before = { status: o.status, invoiceNo: o.invoiceNo, paidAt: o.paidAt, n: o.payments.length };
     var counterBefore = JSON.stringify(S.counters);
     var preview;
@@ -3333,7 +3333,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
       if (amountPaise > preview.due) return Promise.reject(new Error('That is more than the ' + money(preview.due) + ' still due.'));
     } catch (e) { return Promise.reject(e); }
     var ops = finalizeOps(o);
-    var pay = { id: uid(), method: method, amountPaise: amountPaise, at: nowIso(), ref: extra.ref || '', tenderedPaise: extra.tenderedPaise || null, changePaise: extra.changePaise || 0 };
+    var pay = { id: uid(), method: method, amountPaise: amountPaise, at: nowIso(), ref: extra.ref || '', tenderedPaise: extra.tenderedPaise || null, changePaise: extra.changePaise || 0 }; if (method === 'upi') { pay.verified = false; pay.confirmedBy = 'cashier'; }
     o.payments.push(pay);
     var after = E.paymentState(o.snapshot.total, o.payments);
     if (after.due === 0) { o.status = 'paid'; o.paidAt = nowIso(); }
@@ -3513,12 +3513,12 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
   // ---------- statistics ----------
   function dayStats(key) {
     var bills = S.orders.filter(function (o) { return o.billedAt && (o.status === 'billed' || o.status === 'paid') && dayKeyOf(o.billedAt) === key; });
-    var sales = 0, disc = 0, by = { upi: 0, cash: 0, card: 0, credit: 0, platform: 0 }, taxRows = {}, taxable = 0;
+    var sales = 0, disc = 0, by = { upi: 0, cash: 0, card: 0, credit: 0, platform: 0 }, taxRows = {}, taxable = 0, upiU = { paise: 0, payments: 0, bills: [], noRef: 0 };
     bills.forEach(function (o) {
       sales += o.snapshot.total;
       disc += o.snapshot.discount;
       taxable += o.snapshot.taxable;
-      o.payments.forEach(function (p) { by[p.method] = (by[p.method] || 0) + p.amountPaise; });
+      o.payments.forEach(function (p) { by[p.method] = (by[p.method] || 0) + p.amountPaise; if (p.method === 'upi' && p.verified !== true) { upiU.paise += p.amountPaise; upiU.payments++; if (upiU.bills.indexOf(o) < 0) upiU.bills.push(o); if (!p.ref) upiU.noRef++; } });
       o.snapshot.taxRows.forEach(function (t) {
         var k = t.code + ' ' + E.percentLabel(t.bp);
         taxRows[k] = (taxRows[k] || 0) + t.paise;
@@ -3531,7 +3531,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
     var expTotal = exps.reduce(function (s, e) { return s + e.amountPaise; }, 0);
     var voids = S.orders.filter(function (o) { return o.status === 'void' && o.voidedAt && dayKeyOf(o.voidedAt) === key; });
     return {
-      bills: bills, count: bills.length, sales: sales, discounts: disc, by: by, taxable: taxable, taxRows: taxRows,
+      upiUnverified: { paise: upiU.paise, payments: upiU.payments, bills: upiU.bills.length, noRef: upiU.noRef }, bills: bills, count: bills.length, sales: sales, discounts: disc, by: by, taxable: taxable, taxRows: taxRows,
       unpaid: sales - by.upi - by.cash - by.card - by.credit - by.platform, cashExp: cashExp, repayCash: repayCash, expTotal: expTotal, exps: exps,
       voidCount: voids.length, voidTotal: voids.reduce(function (s, o) { return s + o.snapshot.total; }, 0)
     };
@@ -3946,7 +3946,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
       '<div style="padding:12px 16px 0;display:flex;flex-direction:column;gap:14px">' +
       (bill.total ? '<div class="methods" role="group" aria-label="Payment method">' + (S.settings.pay.methods.upi ? mb('upi', 'qr', 'UPI') : '') + mb('cash', 'cash', 'Cash') + (S.settings.pay.methods.card ? mb('card', 'card', 'Card') : '') + mb('split', 'split', 'Split') + mb('credit', 'book', 'Credit', false) + '</div>' : '') +
       body +
-      (o.payments.length ? '<div class="card"><span class="t1">Paid so far</span>' + o.payments.map(function (p) { return '<div class="sumrow"><span>' + METHOD_LABEL[p.method] + ', ' + fmtTime(p.at) + '</span><span>' + money(p.amountPaise) + '</span></div>'; }).join('') + '</div>' : '') +
+      (o.payments.length ? '<div class="card"><span class="t1">Paid so far</span>' + o.payments.map(function (p) { return '<div class="sumrow"><span>' + payLabel(p) + ', ' + fmtTime(p.at) + '</span><span>' + money(p.amountPaise) + '</span></div>'; }).join('') + '</div>' : '') +
       '</div></div>';
   };
   // Whole pixels per square, so phones and printers never see thin gaps between rows.
@@ -3970,8 +3970,8 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
       '<span class="t1" style="font-size:17px">Scan with any UPI app to pay ' + money(due) + '</span>' +
       '<span class="t2" style="max-width:300px">The money goes straight to ' + esc(pay.payeeName || S.settings.shop.name) + '’s bank account (' + esc(pay.upiId) + ').</span>' +
       '<div class="statusrow"><span class="aic info" aria-hidden="true">' + ic('refresh', 20, 2) + '</span><span class="grow" style="text-align:left"><span class="t1">Check your UPI app or sound box</span>' +
-      '<span class="t2">Tap Payment received when the money shows.</span></span></div>' +
-      '<div style="align-self:stretch;text-align:left">' + field('upi-ref', 'UPI reference (optional)', '<input class="input" id="upi-ref" maxlength="30" inputmode="numeric" autocomplete="off">') + '</div>' +
+      '<span class="t2">When the money shows, type its UPI reference and tap Payment received. KIRO cannot check UPI payments itself.</span></span></div>' +
+      '<div style="align-self:stretch;text-align:left">' + field('upi-ref', 'UPI reference (UTR), needed', '<input class="input" id="upi-ref" maxlength="30" inputmode="numeric" autocomplete="off" required aria-required="true">') + '</div>' +
       '<button class="btn btn-primary block" data-act="payUpi">' + ic('check', 20, 2.2) + 'Payment received</button></div>';
   }
   function cashPanel(due) {
@@ -3996,7 +3996,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
       '<p class="t2" style="margin:0">Take part of the bill one way, the rest another way. ' + money(due) + ' is still due.</p>' +
       field('split-amt', 'Amount for this part', '<div class="prefix"><span class="pre" aria-hidden="true">₹</span><input class="input" id="split-amt" data-in="splitInput" inputmode="decimal" autocomplete="off" value="' + (amt != null ? E.paiseToDecimal(amt) : '') + '" placeholder="' + E.paiseToDecimal(due) + '"></div>') +
       (pay.upiId && amt ? '<div style="display:flex;justify-content:center"><div class="qrbox">' + qrSvg(E.upiLink({ vpa: pay.upiId, name: pay.payeeName || S.settings.shop.name, amountPaise: amt, note: whereOf(o) }), 180) + '</div></div>' : '') +
-      '<div class="btnrow"><button class="btn btn-outline flex1" data-act="splitPay" data-arg="upi">UPI</button><button class="btn btn-outline flex1" data-act="splitPay" data-arg="cash">Cash</button><button class="btn btn-outline flex1" data-act="splitPay" data-arg="card">Card</button></div>' +
+      field('split-ref', 'UPI reference (UTR), needed for UPI', '<input class="input" id="split-ref" data-in="splitRef" maxlength="30" inputmode="numeric" autocomplete="off" value="' + esc(UI.splitRef || '') + '">') + '<div class="btnrow"><button class="btn btn-outline flex1" data-act="splitPay" data-arg="upi">UPI</button><button class="btn btn-outline flex1" data-act="splitPay" data-arg="cash">Cash</button><button class="btn btn-outline flex1" data-act="splitPay" data-arg="card">Card</button></div>' +
       '<p class="hint" style="margin:0">Type the amount, then tap how it was paid.' + (pay.upiId ? ' A QR appears for the amount you type.' : '') + '</p></div>';
   }
 
@@ -4006,7 +4006,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
     setTop('brand');
     var b = o.snapshot;
     var last = o.payments[o.payments.length - 1];
-    var methods = o.payments.map(function (p) { return METHOD_LABEL[p.method]; }).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(' and ');
+    var methods = o.payments.map(function (p) { return payLabel(p); }).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(' and ');
     var change = o.payments.reduce(function (s, p) { return s + (p.changePaise || 0); }, 0);
     var lines = liveLines(o);
     return '<div class="screen">' + banner() +
@@ -4441,7 +4441,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
       '<div class="topbar"><button class="back" data-act="back" aria-label="Back">' + ic('back', 24, 2) + '</button><h1>Close day</h1></div>' +
       '<div class="content"><div class="card"><span class="t2">' + fmtDate(nowIso()) + ', ' + esc(S.settings.device.name) + '</span>' +
       [['Bills', String(st.count)], ['Sales', money(st.sales)], ['UPI', money(st.by.upi)], ['Cash', money(st.by.cash)], ['Card', money(st.by.card)], ['Not paid yet', money(st.unpaid)], ['Discounts given', money(st.discounts)], ['Cash expenses', money(st.cashExp)], ['Cash from credit repayments', money(st.repayCash)], ['Voided bills', st.voidCount + ' (' + money(st.voidTotal) + ')']].map(function (r) { return '<div class="sumrow"><span>' + r[0] + '</span><span>' + r[1] + '</span></div>'; }).join('') + '</div>' +
-      '<div class="card"><h2 class="h2" style="margin:0">Count your cash</h2>' +
+      '<div class="card" id="upi-check"><h2 class="h2" style="margin:0">UPI to check with your bank</h2>' + '<p class="t2" style="margin:0">KIRO cannot see your bank account. These UPI payments were confirmed by the cashier only. Match each reference with your bank or UPI app statement.</p>' + [['UPI, not verified', money(st.upiUnverified.paise)], ['Bills with UPI', String(st.upiUnverified.bills)], ['UPI payments', String(st.upiUnverified.payments)], ['UPI payments with no reference', String(st.upiUnverified.noRef)]].map(function (r) { return '<div class="sumrow"><span>' + r[0] + '</span><span>' + r[1] + '</span></div>'; }).join('') + '</div>' + '<div class="card"><h2 class="h2" style="margin:0">Count your cash</h2>' +
       field('open-cash', 'Cash in the drawer when you opened', '<div class="prefix"><span class="pre" aria-hidden="true">₹</span><input class="input" id="open-cash" data-in="openCash" inputmode="decimal" autocomplete="off" value="' + (UI.openCash ? E.paiseToDecimal(UI.openCash) : '') + '" placeholder="0"></div>') +
       field('counted-cash', 'Cash you counted now', '<div class="prefix"><span class="pre" aria-hidden="true">₹</span><input class="input" id="counted-cash" data-in="countedCash" inputmode="decimal" autocomplete="off" value="' + (counted != null ? E.paiseToDecimal(counted) : '') + '"></div>') +
       '<div class="sumrow"><span>Expected in the drawer</span><span id="cash-expected">' + money(expected) + '</span></div>' +
@@ -4907,7 +4907,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
       (o.status === 'cancelled' ? '<p class="err" style="margin:0">Cancelled. Reason: ' + esc(o.voidReason) + '</p>' : '') +
       '<div class="sums">' + lines.map(function (l, i) { return '<div class="sumrow"><span>' + esc(lineTitle(l)) + (l.unit === 'kg' ? ', ' + E.qtyLabel(l) : l.qty > 1 ? ' × ' + l.qty : '') + '</span><span>' + money(b.lines[i] ? b.lines[i].gross : 0) + '</span></div>'; }).join('') + '</div>' +
       '<div class="dash"></div>' + sumsHtml(b) +
-      (o.payments.length ? '<div class="sums"><span class="t1">Payments</span>' + o.payments.map(function (p) { return '<div class="sumrow muted"><span>' + METHOD_LABEL[p.method] + ', ' + fmtTime(p.at) + (p.ref ? ', ref ' + esc(p.ref) : '') + '</span><span>' + money(p.amountPaise) + '</span></div>'; }).join('') + '</div>' : '') +
+      (o.payments.length ? '<div class="sums"><span class="t1">Payments</span>' + o.payments.map(function (p) { return '<div class="sumrow muted"><span>' + payLabel(p) + ', ' + fmtTime(p.at) + (p.ref ? ', ref ' + esc(p.ref) : '') + '</span><span>' + money(p.amountPaise) + '</span></div>'; }).join('') + '</div>' : '') +
       (acts.length ? '<div class="btnrow">' + acts.join('') + '</div>' : '') +
       (o.invoiceNo ? '<button class="btn btn-soft block btn-sm" data-act="shareBill" data-arg="' + o.id + '">' + ic('send', 18) + 'Send on WhatsApp</button>' : '') +
       ((o.status === 'billed' || o.status === 'paid') ? '<button class="link danger" style="align-self:center" data-act="voidAsk" data-arg="' + o.id + '">Void this bill</button>' : '') };
@@ -5028,7 +5028,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
     h += rRow('TOTAL', money(b.total), 'r-big');
     if (o.payments.length) {
       h += '<div class="r-hr"></div>';
-      o.payments.forEach(function (p) { h += rRow('Paid by ' + METHOD_LABEL[p.method], money(p.amountPaise)); if (p.changePaise) h += rRow('Change given', money(p.changePaise)); });
+      o.payments.forEach(function (p) { h += rRow('Paid by ' + payLabel(p), money(p.amountPaise)); if (p.method === 'upi') h += rRow('UPI reference', p.ref ? esc(p.ref) : 'none'); if (p.changePaise) h += rRow('Change given', money(p.changePaise)); });
     }
     if (S.settings.print.footer) h += '<div class="r-hr"></div><div class="r-center">' + esc(S.settings.print.footer) + '</div>';
     return h;
@@ -5301,6 +5301,8 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
   ACT.payUpi = function () {
     var o = curOrder();
     var ref = (document.getElementById('upi-ref') || {}).value || '';
+    var rerr = upiRefError(ref);
+    if (rerr) { showErr('upi-ref', rerr); return; }
     var due = E.paymentState(billOf(o).total, o.payments).due;
     payThen(o, recordPayment(o, 'upi', due, { ref: ref.trim().slice(0, 30) }));
   };
@@ -5331,8 +5333,10 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
     var a = raw.trim() === '' ? due : E.parseRupees(raw);
     if (a == null || a <= 0) { showErr('split-amt', 'Type the amount for this part.'); return; }
     if (a > due) { showErr('split-amt', 'Only ' + money(due) + ' is due.'); return; }
-    UI.splitAmount = null;
-    payThen(o, recordPayment(o, el.dataset.arg, a));
+    var sref = ((document.getElementById('split-ref') || {}).value || '').trim();
+    if (el.dataset.arg === 'upi') { var serr = upiRefError(sref); if (serr) { showErr('split-ref', serr); return; } }
+    UI.splitAmount = null; UI.splitRef = '';
+    payThen(o, recordPayment(o, el.dataset.arg, a, el.dataset.arg === 'upi' ? { ref: sref.slice(0, 30) } : {}));
   };
   ACT.closeZero = function () {
     var o = curOrder();
@@ -5695,7 +5699,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
   ACT.printDay = function () {
     var st = dayStats(todayKey());
     var h = '<div class="r-center r-big">' + esc(S.settings.shop.name) + '</div><div class="r-center">Day report, ' + fmtDate(nowIso()) + '</div><div class="r-center">' + esc(S.settings.device.name) + '</div><div class="r-hr"></div>' +
-      rRow('Bills', String(st.count)) + rRow('Sales', money(st.sales)) + rRow('UPI', money(st.by.upi)) + rRow('Cash', money(st.by.cash)) + rRow('Card', money(st.by.card)) + rRow('Not paid', money(st.unpaid)) + rRow('Discounts', money(st.discounts)) + rRow('Voided', st.voidCount + ' / ' + money(st.voidTotal)) +
+      rRow('Bills', String(st.count)) + rRow('Sales', money(st.sales)) + rRow('UPI', money(st.by.upi)) + rRow('Cash', money(st.by.cash)) + rRow('Card', money(st.by.card)) + rRow('Not paid', money(st.unpaid)) + '<div class="r-hr"></div>' + rRow('UPI not verified', money(st.upiUnverified.paise)) + rRow('UPI payments', String(st.upiUnverified.payments)) + rRow('No UPI reference', String(st.upiUnverified.noRef)) + '<div class="r-hr"></div>' + rRow('Discounts', money(st.discounts)) + rRow('Voided', st.voidCount + ' / ' + money(st.voidTotal)) +
       '<div class="r-hr"></div>' + rRow('Taxable value', money(st.taxable)) + Object.keys(st.taxRows).map(function (k) { return rRow(esc(k), money(st.taxRows[k])); }).join('');
     printHtml(h);
   };
@@ -5703,7 +5707,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
     var st = dayStats(todayKey());
     var expected = (UI.openCash || 0) + st.by.cash + st.repayCash - st.cashExp;
     var d = UI.countedCash == null ? 'not counted' : (UI.countedCash - expected === 0 ? 'matched' : (UI.countedCash - expected > 0 ? 'over by ' : 'short by ') + money(Math.abs(UI.countedCash - expected)));
-    persist([auditOp('Day closed', st.count + ' bills, sales ' + money(st.sales) + ', cash ' + money(st.by.cash) + ', UPI ' + money(st.by.upi) + ', card ' + money(st.by.card) + '. Cash ' + d + '.')]);
+    persist([auditOp('Day closed', st.count + ' bills, sales ' + money(st.sales) + ', cash ' + money(st.by.cash) + ', UPI ' + money(st.by.upi) + ' (not verified, ' + st.upiUnverified.payments + ' payments, ' + st.upiUnverified.noRef + ' without reference), card ' + money(st.by.card) + '. Cash ' + d + '.')]);
     toast('Day close saved in the activity log.');
   };
 
@@ -5753,6 +5757,7 @@ window.KIRO_CLOUD = window.KIRO_CLOUD || { url: '', anonKey: '' };
     UI.splitAmount = v;
     if (changed && S.settings.pay.upiId) render();
   };
+  INP.splitRef = function (el) { UI.splitRef = el.value; };
   INP.optNote = function (el) { UI.sheet.state.note = el.value; };
   INP.grams = function (el) {
     var g = parseInt(el.value, 10);
